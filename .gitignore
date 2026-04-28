@@ -12,3 +12,6 @@ ipython_config.py
 # IDEs
 .idea/
 .vscode/
+
+# LARGE FILES
+profiles.csv
