@@ -8,10 +8,12 @@ dump.ipynb
 # IPython
 profile_default/
 ipython_config.py
+__pycache__/
 
 # IDEs
 .idea/
 .vscode/
+.DS_Store
 
 # LARGE FILES
-profiles.csv
+data/profiles.csv
