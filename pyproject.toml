@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "date-a-scientist"
+version = "0.1.0"
+description = "Date-A-Scientist notebook utilities"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "scipy",
+    "scikit-learn",
+    "implicit",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src","src.*"]

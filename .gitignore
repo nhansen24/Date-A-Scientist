@@ -1,5 +1,6 @@
 dump.ipynb
 .venv/
+*.egg-info/
 
 # Jupyter Notebook
 .ipynb_checkpoints

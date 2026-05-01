@@ -1,3 +1,8 @@
+import gc
+import cupy as cp
+from scipy.sparse import vstack,csr_matrix
+import cupyx.scipy.sparse as cpsp
+from sklearn.feature_extraction.text import TfidfVectorizer
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -25,10 +30,10 @@ def sign_importance_distribution(df,astro_sign):
 
     sign_count = 0
     matters_count = 0
-    #print(f'\n{astro_sign.upper()} distribution:') # uncomment (1 of 2) if viewing full distribution is desired
+    #print(f'\n{astro_sign.upper()} distribution:') # uncomment (1 of 2) if viewing the full distribution is desired
     for sign in df.sign.value_counts().index:
         if astro_sign in sign:
-            #print(f'{sign}: {df.sign.value_counts()[sign]}') # uncomment (2 of 2) if viewing full distribution is desired
+            #print(f'{sign}: {df.sign.value_counts()[sign]}') # uncomment (2 of 2) if viewing the full distribution is desired
             if 'matters a lot' in sign:
                 matters_count = df.sign.value_counts()[sign]
             sign_count += df.sign.value_counts()[sign]
@@ -38,7 +43,7 @@ def sign_importance_distribution(df,astro_sign):
 
 def do_signs_matter(df):
     # INPUT: df = pandas dataframe
-    # OUTPUT: calls sign_importance_distribution() for each astrological sign, prints percentage of users who did not provide a sign.
+    # OUTPUT: calls sign_importance_distribution() for each astrological sign, prints the percentage of users who did not provide a sign.
 
     print('Astrological Sign \'matters a lot\':')
     for sign in ['aries','aquarius','cancer','capricorn','gemini','leo','libra','pisces','sagittarius','scorpio','taurus','virgo']:
@@ -111,7 +116,7 @@ def last_online_priority(df, priority_function):
     # "Current time"
     time_now = datetime.strptime(df.last_online.max(),'%Y-%m-%d-%H-%M')
 
-    # New column for last_online as datetime object
+    # New column for last_online as a datetime object
     df['last_online_date'] = df.last_online.apply(lambda x: datetime.strptime(x,'%Y-%m-%d-%H-%M'))
 
     # Number of weeks since last online
@@ -168,7 +173,7 @@ def user_location_support(df):
         for city_state_region in df.location.unique():
             if state in city_state_region:
                 state_total += df.location.value_counts().loc[city_state_region]
-        #print(f'{state.title()}: {state_total}') # Uncomment to see full state-by-state breakdown
+        #print(f'{state.title()}: {state_total}') # Uncomment to see the full state-by-state breakdown
         overall_total += state_total
         if state == 'california':
             california_total = state_total
@@ -178,5 +183,200 @@ def user_location_support(df):
     print('International based users: ',df.shape[0] - overall_total, '\n')
     print('Percentage of users outside California:',f'{(df.shape[0] - california_total) / df.shape[0] * 100:.2f}%')
     return None
+
+
+def keep_top_n_per_row(matrix, top_n=100):
+    """
+    INPUT: matrix = scipy sparse matrix, top_n = number of top values to keep per row
+    OUTPUT: scipy sparse matrix with only the top_n values per row.
+
+    Significantly reduces sparce matrix size and density.
+    """
+    matrix = matrix.tocsr()
+
+    rows = []
+    cols = []
+    data = []
+
+    for row_idx in range(matrix.shape[0]):
+        start = matrix.indptr[row_idx]
+        end = matrix.indptr[row_idx + 1]
+
+        row_cols = matrix.indices[start:end]
+        row_data = matrix.data[start:end]
+
+        if row_data.size == 0:
+            continue
+
+        keep = min(top_n, row_data.size)
+        top_idx = np.argpartition(row_data, -keep)[-keep:]
+        top_idx = top_idx[np.argsort(row_data[top_idx])[::-1]]
+
+        rows.extend([row_idx] * keep)
+        cols.extend(row_cols[top_idx])
+        data.extend(row_data[top_idx])
+
+    return csr_matrix(
+        (data, (rows, cols)),
+        shape=matrix.shape,
+        dtype=np.float32
+    )
+
+
+
+
+def get_gpu_csr(df1, df2, stop_words = 'english', top_n=100):
+    """ GPU BASED DOT PRODUCT
+    INPUT: df1 = pandas dataframe, df2 = pandas dataframe, stop_words = list of stop words, top_n = number of top values to keep per row
+    OUTPUT: dot product of df1 and df2 sparse matrices with only the top_n values per row.
+    """
+
+    print("CuPy version:", cp.__version__)
+
+
+    # Fit the vectorizer on ALL comments to create the shared vocabulary.
+    # This part still runs on CPU because TfidfVectorizer is scikit-learn-based.
+    matchmaking_essays = pd.concat(
+        [
+            df1.combined_essays,
+            df2.combined_essays
+        ],
+        ignore_index=True
+    )
+
+    vectorizer = TfidfVectorizer(stop_words=stop_words)
+    vectorizer.fit(matchmaking_essays)
+
+    # Transform each group separately
+    men_tfidf = vectorizer.transform(
+        df1.combined_essays
+    ).astype("float32")
+
+    women_tfidf = vectorizer.transform(
+        df2.combined_essays
+    ).astype("float32")
+
+    chunk_list = []
+    women_tfidf_gpu = cpsp.csr_matrix(women_tfidf)
+
+    for start in range(0, men_tfidf.shape[0], 1000):
+        end = min(start + 1000, men_tfidf.shape[0])
+        #print(f"Processing rows {start} to {end}")
+        men_tfidf_chunk = cpsp.csr_matrix(men_tfidf[start:end])
+
+        # Dot product between men(chunk) and women(whole)
+        men_women_interaction_chunk = men_tfidf_chunk @ women_tfidf_gpu.T
+        chunk_list.append(keep_top_n_per_row(men_women_interaction_chunk.get().tocsr(), top_n=top_n).tocsr())
+
+        if men_women_interaction_chunk.nnz == 0:
+            raise RuntimeError(
+                f"GPU multiplication returned an empty result for rows {start} to {end}."
+            )
+
+        # Clean up intermediate objects
+        del men_tfidf_chunk, men_women_interaction_chunk
+        cp.get_default_memory_pool().free_all_blocks()
+
+
+    men_women_csr = vstack(chunk_list,format="csr")
+    print("\nmen_women_csr nnz:", men_women_csr.nnz)
+    print('csr density:', men_women_csr.nnz / (men_women_csr.shape[0] * men_women_csr.shape[1]))
+
+    del women_tfidf_gpu
+    del men_tfidf
+    del women_tfidf
+
+    cp.get_default_memory_pool().free_all_blocks()
+    gc.collect()
+
+    return men_women_csr
+
+
+
+def get_cpu_csr(df1,df2,stop_words='english',top_n=100):
+    """ CPU BASED DOT PRODUCT
+    INPUT: df1 = pandas dataframe, df2 = pandas dataframe, stop_words = list of stop words, top_n = number of top values to keep per row
+    OUTPUT: dot product of df1 and df2 sparse matrices with only the top_n values per row.
+    """
+    # Fit the vectorizer on ALL comments to create shared vocabulary
+    matchmaking_essays = pd.concat(
+        [
+            df1.combined_essays,
+            df2.combined_essays
+        ],
+        ignore_index=True
+    )
+
+    vectorizer = TfidfVectorizer(stop_words=stop_words)
+    vectorizer.fit(matchmaking_essays)
+
+    # Transform each group separately
+    men_tfidf = vectorizer.transform(
+        df1.combined_essays
+    ).astype('float32')   # Shape: (num_men, num_features)
+
+    women_tfidf = vectorizer.transform(
+        df2.combined_essays
+    ).astype('float32')
+
+    # Multiply Men (Users) by Women (Items) to get similarity scores
+    # Resulting shape: (num_men, num_women)
+    men_women_interaction = men_tfidf.dot(women_tfidf.T)
+
+    # Convert to CSR format (required by implicit)
+    men_women_csr = keep_top_n_per_row(men_women_interaction.tocsr(),top_n=top_n).tocsr()
+
+    print("\nmen_women_csr nnz:", men_women_csr.nnz)
+    print('csr density:', men_women_csr.nnz / (men_women_csr.shape[0] * men_women_csr.shape[1]))
+
+    del men_tfidf,women_tfidf
+    gc.collect()
+
+    return men_women_csr
+
+
+
+def measure_matrix_overlap(a,b):
+    """
+    INPUT: a = scipy sparse matrix, b = scipy sparse matrix
+    OUTPUT: measures overlap between two sparse matrices. (1.0 = perfect overlap)
+    """
+    a = a.tocsr()
+    b = b.tocsr()
+
+    if a.shape != b.shape:
+        raise ValueError(f"Shape mismatch: {a.shape} vs {b.shape}")
+
+    overlaps = []
+
+    for row_idx in range(a.shape[0]):
+        a_start = a.indptr[row_idx]
+        a_end = a.indptr[row_idx + 1]
+        b_start = b.indptr[row_idx]
+        b_end = b.indptr[row_idx + 1]
+
+        a_cols = set(a.indices[a_start:a_end])
+        b_cols = set(b.indices[b_start:b_end])
+
+        if not a_cols and not b_cols:
+            overlaps.append(1.0)
+            continue
+
+        union_size = len(a_cols | b_cols)
+
+        if union_size == 0:
+            overlaps.append(1.0)
+        else:
+            overlaps.append(len(a_cols & b_cols) / union_size)
+
+    overlaps = np.array(overlaps)
+
+    print("Mean row overlap:", overlaps.mean().round(6))
+    print("Median row overlap:", np.median(overlaps).round(6))
+    print("Min row overlap:", overlaps.min().round(6))
+    print("Max row overlap:", overlaps.max().round(6))
+    print("% of Rows with perfect overlap:", np.mean(overlaps == 1.0).round(6) * 100, "%")
+
+    return overlaps
 
 
