@@ -1,12 +1,22 @@
 import gc
-import cupy as cp
-from scipy.sparse import vstack,csr_matrix
-import cupyx.scipy.sparse as cpsp
-from sklearn.feature_extraction.text import TfidfVectorizer
+import warnings
 import pandas as pd
 import numpy as np
 from datetime import datetime
 import matplotlib.pyplot as plt
+from scipy.sparse import vstack,csr_matrix
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+try:
+    import cupy as cp
+    import cupyx.scipy.sparse as cpsp
+    HAS_CUPY = True
+except ImportError:
+    HAS_CUPY = False
+    cp = None
+    cpsp = None
+HAS_CUDA_GPU = HAS_CUPY and cp.is_available()
+
 
 def unique_and_missing_values(df):
     # INPUT: df = pandas dataframe
@@ -230,6 +240,8 @@ def get_gpu_csr(df1, df2, stop_words = 'english', top_n=100):
     INPUT: df1 = pandas dataframe, df2 = pandas dataframe, stop_words = list of stop words, top_n = number of top values to keep per row
     OUTPUT: dot product of df1 and df2 sparse matrices with only the top_n values per row.
     """
+    if not HAS_CUDA_GPU:
+        return print("No CUDA GPU detected.")
 
     print("CuPy version:", cp.__version__)
 
@@ -341,6 +353,11 @@ def measure_matrix_overlap(a,b):
     INPUT: a = scipy sparse matrix, b = scipy sparse matrix
     OUTPUT: measures overlap between two sparse matrices. (1.0 = perfect overlap)
     """
+    if isinstance(a, (list,np.ndarray)):
+        a = csr_matrix(a)
+    if isinstance(b, (list,np.ndarray)):
+        b = csr_matrix(b)
+
     a = a.tocsr()
     b = b.tocsr()
 
@@ -378,5 +395,48 @@ def measure_matrix_overlap(a,b):
     print("% of Rows with perfect overlap:", np.mean(overlaps == 1.0).round(6) * 100, "%")
 
     return overlaps
+
+
+
+def measure_value_overlap(a: np.ndarray, b: np.ndarray):
+    """
+    INPUT: a = ndarray, b = ndarray
+    OUTPUT: None, prints measure of overlap between ndarrays
+    """
+
+    # Make sure dimensions match
+    if a.shape != b.shape:
+        raise ValueError(f"Shape mismatch: {a.shape} vs {b.shape}")
+
+    row_exact_scores = []
+    row_shared_values_scores = []
+
+    for i in range(a.shape[0]):
+        # Retrieve row idx as a dense array
+        a_row = a[i]
+        b_row = b[i]
+
+        # Distinct value overlap
+        a_row_set = set(a_row)
+        b_row_set = set(b_row)
+
+        row_shared_values = len(a_row_set.intersection(b_row_set))
+        row_shared_score = row_shared_values/len(a_row) if len(a_row) > 0 else 1.0
+        row_shared_values_scores.append(row_shared_score)
+
+        # Count exact matches for this row
+        exact_matches = np.sum(a_row == b_row)
+        exact_score = exact_matches / a_row.size if a_row.size > 0 else 1.0
+        row_exact_scores.append(exact_score)
+
+    a_set = set(a.ravel())
+    b_set = set(b.ravel())
+    shared_values = len(a_set.intersection(b_set))
+
+    print(f"Mean percent of exact overlap per row: {(np.mean(row_exact_scores) * 100).round(6)}%")
+    print(f'Mean percent of values shared per row: {(np.mean(row_shared_values_scores) * 100).round(6)}%')
+    print(f"Total number of values shared: {shared_values} of {pd.Series(a.ravel()).nunique()}")
+
+    return None
 
 
