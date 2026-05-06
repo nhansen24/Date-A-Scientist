@@ -202,6 +202,9 @@ def keep_top_n_per_row(matrix, top_n=100):
 
     Significantly reduces sparce matrix size and density.
     """
+    if top_n is None:
+        return matrix
+
     matrix = matrix.tocsr()
 
     rows = []
@@ -256,7 +259,7 @@ def get_gpu_csr(df1, df2, stop_words = 'english', top_n=100):
         ignore_index=True
     )
 
-    vectorizer = TfidfVectorizer(stop_words=stop_words)
+    vectorizer = TfidfVectorizer(stop_words=stop_words,dtype=np.float32)
     vectorizer.fit(matchmaking_essays)
 
     # Transform each group separately
@@ -292,7 +295,7 @@ def get_gpu_csr(df1, df2, stop_words = 'english', top_n=100):
 
     men_women_csr = vstack(chunk_list,format="csr")
     print("\nmen_women_csr nnz:", men_women_csr.nnz)
-    print('csr density:', men_women_csr.nnz / (men_women_csr.shape[0] * men_women_csr.shape[1]))
+    print(f'csr density: {men_women_csr.nnz / (men_women_csr.shape[0] * men_women_csr.shape[1])*100:.4f}%')
 
     del women_tfidf_gpu
     del men_tfidf
@@ -319,7 +322,7 @@ def get_cpu_csr(df1,df2,stop_words='english',top_n=100):
         ignore_index=True
     )
 
-    vectorizer = TfidfVectorizer(stop_words=stop_words)
+    vectorizer = TfidfVectorizer(stop_words=stop_words,dtype=np.float32)
     vectorizer.fit(matchmaking_essays)
 
     # Transform each group separately
@@ -339,7 +342,7 @@ def get_cpu_csr(df1,df2,stop_words='english',top_n=100):
     men_women_csr = keep_top_n_per_row(men_women_interaction.tocsr(),top_n=top_n).tocsr()
 
     print("\nmen_women_csr nnz:", men_women_csr.nnz)
-    print('csr density:', men_women_csr.nnz / (men_women_csr.shape[0] * men_women_csr.shape[1]))
+    print(f'csr density: {men_women_csr.nnz / (men_women_csr.shape[0] * men_women_csr.shape[1])*100:.4f}%')
 
     del men_tfidf,women_tfidf
     gc.collect()
@@ -433,9 +436,9 @@ def measure_value_overlap(a: np.ndarray, b: np.ndarray):
     b_set = set(b.ravel())
     shared_values = len(a_set.intersection(b_set))
 
-    print(f"Mean percent of exact overlap per row: {(np.mean(row_exact_scores) * 100).round(6)}%")
-    print(f'Mean percent of values shared per row: {(np.mean(row_shared_values_scores) * 100).round(6)}%')
-    print(f"Total number of values shared: {shared_values} of {pd.Series(a.ravel()).nunique()}")
+    print(f"Mean percent of exact overlap per row: {(np.mean(row_exact_scores) * 100):.4f}%")
+    print(f'Mean percent of values shared per row: {(np.mean(row_shared_values_scores) * 100):.4f}%')
+    print(f"Total number of values shared: {shared_values} of {np.max([pd.Series(a.ravel()).nunique(),pd.Series(b.ravel()).nunique()])}")
 
     return None
 
