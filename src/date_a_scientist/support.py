@@ -243,6 +243,8 @@ def get_gpu_csr(df1, df2, stop_words = 'english', top_n=100):
     INPUT: df1 = pandas dataframe, df2 = pandas dataframe, stop_words = list of stop words, top_n = number of top values to keep per row
     OUTPUT: dot product of df1 and df2 sparse matrices with only the top_n values per row.
     """
+
+    # CHECK if hardware supports CUDA
     if not HAS_CUDA_GPU:
         return print("No CUDA GPU detected.")
 
@@ -274,6 +276,7 @@ def get_gpu_csr(df1, df2, stop_words = 'english', top_n=100):
     chunk_list = []
     women_tfidf_gpu = cpsp.csr_matrix(women_tfidf)
 
+    # USING iterations of data "chunks" to prevent memory issues. 1000 rows at a time.
     for start in range(0, men_tfidf.shape[0], 1000):
         end = min(start + 1000, men_tfidf.shape[0])
         #print(f"Processing rows {start} to {end}")
