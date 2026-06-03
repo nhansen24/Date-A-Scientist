@@ -265,49 +265,49 @@ def get_gpu_csr(df1, df2, stop_words = 'english', top_n=100):
     vectorizer.fit(matchmaking_essays)
 
     # Transform each group separately
-    men_tfidf = vectorizer.transform(
+    df1_tfidf = vectorizer.transform(
         df1.combined_essays
     ).astype("float32")
 
-    women_tfidf = vectorizer.transform(
+    df2_tfidf = vectorizer.transform(
         df2.combined_essays
     ).astype("float32")
 
     chunk_list = []
-    women_tfidf_gpu = cpsp.csr_matrix(women_tfidf)
+    df2_tfidf_gpu = cpsp.csr_matrix(df2_tfidf)
 
     # USING iterations of data "chunks" to prevent memory issues. 1000 rows at a time.
-    for start in range(0, men_tfidf.shape[0], 1000):
-        end = min(start + 1000, men_tfidf.shape[0])
+    for start in range(0, df1_tfidf.shape[0], 1000):
+        end = min(start + 1000, df1_tfidf.shape[0])
         #print(f"Processing rows {start} to {end}")
-        men_tfidf_chunk = cpsp.csr_matrix(men_tfidf[start:end])
+        df1_tfidf_chunk = cpsp.csr_matrix(df1_tfidf[start:end])
 
-        # Dot product between men(chunk) and women(whole)
-        men_women_interaction_chunk = men_tfidf_chunk @ women_tfidf_gpu.T
-        chunk_list.append(keep_top_n_per_row(men_women_interaction_chunk.get().tocsr(), top_n=top_n).tocsr())
+        # Dot product between df1(chunk) and df2(whole)
+        df1_df2_interaction_chunk = df1_tfidf_chunk @ df2_tfidf_gpu.T
+        chunk_list.append(keep_top_n_per_row(df1_df2_interaction_chunk.get().tocsr(), top_n=top_n).tocsr())
 
-        if men_women_interaction_chunk.nnz == 0:
+        if df1_df2_interaction_chunk.nnz == 0:
             raise RuntimeError(
                 f"GPU multiplication returned an empty result for rows {start} to {end}."
             )
 
         # Clean up intermediate objects
-        del men_tfidf_chunk, men_women_interaction_chunk
+        del df1_tfidf_chunk, df1_df2_interaction_chunk
         cp.get_default_memory_pool().free_all_blocks()
 
 
-    men_women_csr = vstack(chunk_list,format="csr")
-    print("\nmen_women_csr nnz:", men_women_csr.nnz)
-    print(f'csr density: {men_women_csr.nnz / (men_women_csr.shape[0] * men_women_csr.shape[1])*100:.4f}%')
+    df1_df2_csr = vstack(chunk_list,format="csr")
+    print("\ndf1_df2_csr nnz:", df1_df2_csr.nnz)
+    print(f'csr density: {df1_df2_csr.nnz / (df1_df2_csr.shape[0] * df1_df2_csr.shape[1])*100:.4f}%')
 
-    del women_tfidf_gpu
-    del men_tfidf
-    del women_tfidf
+    del df2_tfidf_gpu
+    del df1_tfidf
+    del df2_tfidf
 
     cp.get_default_memory_pool().free_all_blocks()
     gc.collect()
 
-    return men_women_csr
+    return df1_df2_csr
 
 
 
@@ -329,28 +329,34 @@ def get_cpu_csr(df1,df2,stop_words='english',top_n=100):
     vectorizer.fit(matchmaking_essays)
 
     # Transform each group separately
-    men_tfidf = vectorizer.transform(
+    df1_tfidf = vectorizer.transform(
         df1.combined_essays
-    ).astype('float32')   # Shape: (num_men, num_features)
+    ).astype('float32')   # Shape: (num_df1, num_features)
 
-    women_tfidf = vectorizer.transform(
+    df2_tfidf = vectorizer.transform(
         df2.combined_essays
     ).astype('float32')
 
-    # Multiply Men (Users) by Women (Items) to get similarity scores
-    # Resulting shape: (num_men, num_women)
-    men_women_interaction = men_tfidf.dot(women_tfidf.T)
+    # Multiply df1 (Users) by df2 (Items) to get similarity scores
+    # Resulting shape: (num_df1, num_df2)
+    df1_df2_interaction = df1_tfidf.dot(df2_tfidf.T)
+
+    """NEW"""
+    if df1.shape == df2.shape: # If comparing to self, remove diagonal
+        df1_df2_interaction.setdiag(0)
+        df1_df2_interaction.eliminate_zeros()
+    """NEW"""
 
     # Convert to CSR format (required by implicit)
-    men_women_csr = keep_top_n_per_row(men_women_interaction.tocsr(),top_n=top_n).tocsr()
+    df1_df2_csr = keep_top_n_per_row(df1_df2_interaction.tocsr(),top_n=top_n).tocsr()
 
-    print("\nmen_women_csr nnz:", men_women_csr.nnz)
-    print(f'csr density: {men_women_csr.nnz / (men_women_csr.shape[0] * men_women_csr.shape[1])*100:.4f}%')
+    print("\ndf1_df2_csr nnz:", df1_df2_csr.nnz)
+    print(f'csr density: {df1_df2_csr.nnz / (df1_df2_csr.shape[0] * df1_df2_csr.shape[1])*100:.4f}%')
 
-    del men_tfidf,women_tfidf
+    del df1_tfidf,df2_tfidf
     gc.collect()
 
-    return men_women_csr
+    return df1_df2_csr
 
 
 
