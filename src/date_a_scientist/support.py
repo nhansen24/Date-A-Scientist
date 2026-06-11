@@ -6,6 +6,11 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 from scipy.sparse import vstack,csr_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.neighbors import NearestNeighbors
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.base import BaseEstimator, TransformerMixin
+
 
 try:
     import cupy as cp
@@ -451,4 +456,386 @@ def measure_value_overlap(a: np.ndarray, b: np.ndarray):
 
     return None
 
+
+def combine_ranked_matches(
+        essay_matches,
+        profile_matches,
+        essay_weight = 0.6,
+        profile_weight = 0.4,
+        final_n = 50
+):
+    """
+    Combine ranked matches from essay and profile matches using specified weights and return the top final_n candidates.
+    INPUT: essay_matches = list(),
+           profile_matches = list(),
+           essay_weight = float,
+           profile_weight = float,
+           final_n = int
+    OUTPUT: ranked_candidates = list()
+    """
+    profile_scores = {}
+
+    for rank, candidate_idx in enumerate(essay_matches):
+        rank_score = essay_weight * (len(essay_matches) - rank)
+        profile_scores[candidate_idx] = profile_scores.get(candidate_idx, 0) + rank_score
+
+    for rank, candidate_idx in enumerate(profile_matches):
+        rank_score = profile_weight * (len(profile_matches) - rank)
+        profile_scores[candidate_idx] = profile_scores.get(candidate_idx, 0) + rank_score
+
+    ranked_candidates = sorted(
+        profile_scores.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )
+
+    return [candidate_idx for candidate_idx, score in ranked_candidates[:final_n]]
+
+
+def get_user_ids(recommendation_indices, df_in):
+    """
+    Return a list of user IDs corresponding to the given indices from the input DataFrame.
+    INPUT: recommendation_indices = list(),
+           df_in = pandas.DataFrame()
+    OUTPUT: user_ids = list()
+    """
+    return list(df_in.user_id.values[recommendation_indices])
+
+
+def show_recommended_profiles(source_df, target_df, source_idx, n=5):
+    """
+    Display recommended profiles based on the given source and target DataFrames.
+    INPUT: source_df = pandas.DataFrame(),
+           target_df = pandas.DataFrame(),
+           source_idx = int,
+           n = int (Number of recommended profiles to display)
+    OUTPUT: slice from target_df corresponding to the recommended profiles.
+    """
+    recommended_indices = source_df.loc[source_idx, 'recommended_matches'][:n]
+    display_columns = [
+        'user_id',
+        'age',
+        'body_type',
+        'height',
+        'smokes_yes',
+        'smokes_no',
+        'religion_affiliation',
+        'last_online_priority',
+        #'education',
+    ]
+    print(f'User ID: {[int(val) for val in get_user_ids([source_idx], source_df)]} \t (user df index: {source_idx})')
+    print(f'Recommended User IDs: {[int(val) for val in get_user_ids(recommended_indices, target_df)]}\n')
+    return target_df.loc[recommended_indices, display_columns]
+
+
+
+# Weighting features like 'age' to prioritize matching users close in age.
+class WeightedNumericFeatures(BaseEstimator, TransformerMixin):
+    """
+    Transformer that applies weighted scaling to numeric features.
+    """
+    def __init__(self, feature_weights=None):
+        self.scaler_ = None
+        self.columns_ = None
+        self.feature_weights = feature_weights or {}
+
+    def fit(self, x, y=None):
+        self.columns_ = list(x.columns)
+        self.scaler_ = StandardScaler()
+        self.scaler_.fit(x)
+        return self
+
+    def transform(self, x):
+        x_scaled = self.scaler_.transform(x)
+
+        for feature_name, weight in self.feature_weights.items():
+            if feature_name in self.columns_:
+                feature_index = self.columns_.index(feature_name)
+                x_scaled[:, feature_index] *= weight
+
+        return x_scaled
+
+
+# noinspection DuplicatedCode
+def match_same_sex(df_in,i=11):
+    """
+    Return DataFrame with new features corresponding to Profile, Essay, and Combined Recommendations.
+    INPUT: df_in = pandas.DataFrame(), i = int (index of user to compare)
+    OUTPUT: pandas.DataFrame() with new features added.
+    """
+    df_1 = df_in
+
+    # ESSAY NEAREST NEIGHBORS:
+    essay_nn = NearestNeighbors(
+        n_neighbors=101,
+        metric='cosine',
+        algorithm='brute',
+        n_jobs=-1
+    )
+
+    vectorizer = TfidfVectorizer(
+        stop_words='english',
+    )
+
+    tfidf_df_1 = vectorizer.fit_transform(df_1.combined_essays)
+    essay_nn.fit(tfidf_df_1)
+    dist, idx = essay_nn.kneighbors(tfidf_df_1)
+
+    essay_indices = idx[:,1:101]
+    essay_scores = 1 - dist[:,1:101]
+
+    # ADD essay match indices as new feature:
+    df_1['essay_matches'] = list(essay_indices)
+
+    # DROP features prior to profile (non-essay) matching
+    list_of_features_to_drop = ['essay0', 'essay1','essay2', 'essay3', 'essay4', 'essay5', 'essay6', 'essay7', 'essay8',
+                                'essay9','ethnicity', 'orientation', 'pets', 'sex', 'diet', 'last_online_date',
+                                'last_online_weeks','ready_to_match','profile_matches','recommended_matches',
+                                'recommended_matches_user_ids']
+
+    for feature in list_of_features_to_drop:
+        try:
+            df_1.drop(columns=[feature],inplace=True)
+        except KeyError:
+            pass
+
+    # ADD `df_profile_mm` for Profile Matchmaking and DROP user_id and essay features
+    features_to_drop = ['user_id','essay_matches','combined_essays']
+    df_profile_mm = df_1.drop(columns=features_to_drop)
+
+    num_features = df_profile_mm.select_dtypes(include=['int64','int32','float64','float32']).columns.tolist()
+    cat_features = df_profile_mm.select_dtypes(include=['object','str','bool','category']).columns.tolist()
+
+    # profile_preprocessor uses WeightedNumericFeatures to prioritize matching users closer in age.
+    profile_preprocessor = ColumnTransformer(
+        transformers=[
+            ('num',
+             WeightedNumericFeatures(feature_weights={
+                 'age': 3.0, # Higher weight assigned for the 'age' feature to prioritize matching users closer in age.
+                 'height': 1.0,
+                 'last_online_priority': 1.0,
+                 'religion_affiliation': 1.0
+             }),
+             num_features),
+            ('cat', OneHotEncoder(
+                handle_unknown='ignore',
+                sparse_output = True
+            ),
+             cat_features)
+        ],
+        remainder='drop'
+    )
+    profile_matrix = profile_preprocessor.fit_transform(df_profile_mm)
+
+    # PROFILE NEAREST NEIGHBORS:
+    profile_nn = NearestNeighbors(
+        n_neighbors=101,
+        metric='cosine',
+        algorithm='brute',
+        n_jobs=-1
+    )
+    profile_nn.fit(profile_matrix)
+
+    dist, idx = profile_nn.kneighbors(profile_matrix, return_distance=True)
+
+    # ADD feature for profile matches
+    df_1['profile_matches'] = list(idx[:,1:101])
+
+    # ADD feature for combined recommendation
+    df_1['recommended_matches'] = df_1.apply(
+        lambda row: combine_ranked_matches(
+            essay_matches = row.essay_matches,
+            profile_matches = row.profile_matches,
+            essay_weight = 0.2,
+            profile_weight = 0.8,
+            final_n = 50
+        ),
+        axis=1
+    )
+
+    # ADD feature for combined recommendation user ids
+    df_1['recommended_matches_user_ids'] = df_1.apply(
+        lambda row: get_user_ids(
+            recommendation_indices = row.recommended_matches,
+            df_in = df_1
+        ),
+        axis=1
+    )
+
+    # Compare User at index (i) with their top 5 matches
+    print('User Profile:')
+    print(df_1.loc[i,(
+        'user_id',
+        'age',
+        'body_type',
+        'height',
+        'smokes_yes',
+        'smokes_no',
+        'religion_affiliation',
+        'last_online_priority'
+    )].T)
+
+    print(show_recommended_profiles(df_1, df_1, i, n=5).T)
+
+    return df_1
+
+
+# noinspection DuplicatedCode
+def match_opposite_sex(df_1,df_2,i=11):
+    """
+    Return DataFrame with new features corresponding to Profile, Essay, and Combined Recommendations.
+    INPUT: df_1 = pandas.DataFrame(), df_2 = pandas.DataFrame(), i = int (index of user to compare)
+    OUTPUT: df_1 and df_2 with new features added.
+    """
+    # ESSAY NEAREST NEIGHBORS:
+    essay_nn = NearestNeighbors(
+        n_neighbors=100,
+        metric='cosine',
+        algorithm='brute',
+        n_jobs=-1
+    )
+    # ESSAY VECTORIZER:
+    vectorizer = TfidfVectorizer(
+        stop_words='english',
+    )
+
+    vectorizer.fit(pd.concat([df_1.combined_essays,df_2.combined_essays]))
+    tfidf_df_1 = vectorizer.transform(df_1.combined_essays)
+    tfidf_df_2 = vectorizer.transform(df_2.combined_essays)
+
+    # FIT on target dataframe, QUERY from source dataframe
+    essay_nn.fit(tfidf_df_2)  # Fit on df_2 (women)
+    dist1, idx1 = essay_nn.kneighbors(tfidf_df_1)  # Query from df_1 (men)
+
+    essay_nn.fit(tfidf_df_1)  # Fit on df_1 (men)
+    dist2, idx2 = essay_nn.kneighbors(tfidf_df_2)  # Query from df_2 (women)
+
+    essay_indices1 = idx1
+    essay_scores1 = 1 - dist1
+    essay_indices2 = idx2
+    essay_scores2 = 1 - dist2
+
+    # ADD essay match indices as new feature:
+    df_1['essay_matches'] = list(essay_indices1)
+    df_2['essay_matches'] = list(essay_indices2)
+
+    # DROP features prior to profile (non-essay) matching
+    list_of_features_to_drop = ['essay0', 'essay1','essay2', 'essay3', 'essay4', 'essay5', 'essay6', 'essay7', 'essay8',
+                                'essay9','ethnicity', 'orientation', 'pets', 'sex', 'diet', 'last_online_date',
+                                'last_online_weeks','ready_to_match','profile_matches','recommended_matches',
+                                'recommended_matches_user_ids']
+
+    for feature in list_of_features_to_drop:
+        try:
+            df_1.drop(columns=[feature],inplace=True)
+            df_2.drop(columns=[feature],inplace=True)
+        except KeyError:
+            pass
+
+    # ADD `df_profile_mm` for Profile Matchmaking and DROP user_id and essay features
+    features_to_drop = ['user_id','essay_matches','combined_essays']
+    df_profile_1 = df_1.drop(columns=features_to_drop)
+    df_profile_2 = df_2.drop(columns=features_to_drop)
+
+    num_features = df_profile_1.select_dtypes(include=['int64','int32','float64','float32']).columns.tolist()
+    cat_features = df_profile_1.select_dtypes(include=['object','str','bool','category']).columns.tolist()
+
+    # profile_preprocessor uses WeightedNumericFeatures to prioritize matching users closer in age.
+    profile_preprocessor = ColumnTransformer(
+        transformers=[
+            ('num',
+             WeightedNumericFeatures(feature_weights={
+                 'age': 3.0, # Higher weight assigned for the 'age' feature to prioritize matching users closer in age.
+                 'height': 1.0,
+                 'last_online_priority': 1.0,
+                 'religion_affiliation': 1.0
+             }),
+             num_features),
+            ('cat', OneHotEncoder(
+                handle_unknown='ignore',
+                sparse_output = True
+            ),
+             cat_features)
+        ],
+        remainder='drop'
+    )
+    profile_preprocessor.fit(pd.concat([df_profile_1,df_profile_2],axis=0,ignore_index=True))
+    profile_matrix1 = profile_preprocessor.transform(df_profile_1)
+    profile_matrix2 = profile_preprocessor.transform(df_profile_2)
+
+    del df_profile_1,df_profile_2
+
+    # PROFILE NEAREST NEIGHBORS:
+    profile_nn = NearestNeighbors(
+        n_neighbors=100,
+        metric='cosine',
+        algorithm='brute',
+        n_jobs=-1
+    )
+    profile_nn.fit(profile_matrix2)  # Fit on women
+    dist1, idx1 = profile_nn.kneighbors(profile_matrix1)  # Men find women
+
+    profile_nn.fit(profile_matrix1)  # Fit on men
+    dist2, idx2 = profile_nn.kneighbors(profile_matrix2)  # Women find men
+
+    # ADD feature for profile matches
+    df_1['profile_matches'] = list(idx1)
+    df_2['profile_matches'] = list(idx2)
+
+    # ADD feature for combined recommendation
+    df_1['recommended_matches'] = df_1.apply(
+        lambda row: combine_ranked_matches(
+            essay_matches = row.essay_matches,
+            profile_matches = row.profile_matches,
+            essay_weight = 0.2,
+            profile_weight = 0.8,
+            final_n = 50
+        ),
+        axis=1
+    )
+
+    df_2['recommended_matches'] = df_2.apply(
+        lambda row: combine_ranked_matches(
+            essay_matches = row.essay_matches,
+            profile_matches = row.profile_matches,
+            essay_weight = 0.2,
+            profile_weight = 0.8,
+            final_n = 50
+        ),
+        axis=1
+    )
+
+    # ADD feature for combined recommendation user ids
+    df_1['recommended_matches_user_ids'] = df_1.apply(
+        lambda row: get_user_ids(
+            recommendation_indices = row.recommended_matches,
+            df_in = df_2
+        ),
+        axis=1
+    )
+
+    df_2['recommended_matches_user_ids'] = df_2.apply(
+        lambda row: get_user_ids(
+            recommendation_indices = row.recommended_matches,
+            df_in = df_1
+        ),
+        axis=1
+    )
+
+    # Compare User at index (i) with their top 5 matches
+    print('User Profile:')
+    print(df_1.loc[i,(
+        'user_id',
+        'age',
+        'body_type',
+        'height',
+        'smokes_yes',
+        'smokes_no',
+        'religion_affiliation',
+        'last_online_priority'
+    )].T)
+
+    print(show_recommended_profiles(df_1, df_2, i, n=5).T)
+
+    return df_1,df_2
 
